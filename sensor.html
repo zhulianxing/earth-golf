@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>EARTH GOLF · 手机球杆</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { background: #070d12; color: #eafff2; font-family: -apple-system, "PingFang SC", sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px; text-align: center; user-select: none; -webkit-user-select: none; }
+  h1 { font-size: 20px; letter-spacing: .1em; color: #5ad395; }
+  .sub { color: #b9e8cc; font-size: 13px; margin: 8px 0 24px; line-height: 1.8; }
+  #btn { width: 220px; height: 220px; border-radius: 50%; border: 3px solid #32f08c;
+    background: radial-gradient(circle, #0d1a12, #070d12); color: #32f08c; font-size: 22px; font-weight: 700;
+    letter-spacing: .1em; }
+  #btn.on { background: radial-gradient(circle, #123524, #070d12); box-shadow: 0 0 40px #32f08c66; }
+  #btn.swing { background: #32f08c; color: #04120a; }
+  #meter { width: 260px; height: 10px; background: #10241a; border-radius: 5px; margin-top: 28px; overflow: hidden; }
+  #bar { height: 100%; width: 0; background: linear-gradient(90deg, #32f08c, #ffd76a, #e8463a); transition: width .05s; }
+  #log { margin-top: 18px; font-size: 13px; color: #8fbfa3; min-height: 60px; line-height: 1.7; }
+  .row { margin-top: 14px; font-size: 12px; color: #b9e8cc; }
+  input[type=range] { width: 200px; accent-color: #32f08c; vertical-align: middle; }
+</style>
+</head>
+<body>
+<h1>EARTH GOLF · 手机球杆</h1>
+<p class="sub">单手握持手机，像甩杆一样快速甩动一下<br>甩得越狠打得越远，在最大速度处自动击球</p>
+<button id="btn">启动<br>传感器</button>
+<div id="meter"><div id="bar"></div></div>
+<div id="log">未启动</div>
+<div class="row">灵敏度 <input type="range" id="sens" min="30" max="450" value="120" step="10"> <span id="sensV">120</span>
+  <button class="aimBtn" onclick="preset(260)">全挥</button>
+  <button class="aimBtn" onclick="preset(60)">推杆</button></div>
+<div class="row">力量 <input type="range" id="pow" min="0.4" max="1.6" value="1" step="0.05"> <span id="powV">1.0</span>
+  <span style="color:#7fa68d;font-size:11px">打太远就往左调</span></div>
+<div class="row">杆速微调
+  <button class="aimBtn" onclick="trimNudge(-0.5)">−0.5</button>
+  <span id="trimV" class="mono" style="min-width:80px;display:inline-block;color:#eafff2">+0.0 m/s</span>
+  <button class="aimBtn" onclick="trimNudge(0.5)">+0.5</button>
+  <span style="color:#7fa68d;font-size:11px">短杆攻洞用它精确拨杆速</span></div>
+<div class="row" style="margin-top:18px">
+  瞄准
+  <button class="aimBtn" onclick="aimNudge(-0.5)">◀ 0.5°</button>
+  <button class="aimBtn" onclick="aimNudge(-0.1)">◀ 0.1°</button>
+  <span id="aimNow" class="mono" style="min-width:60px;display:inline-block;color:#eafff2">0.0°</span>
+  <button class="aimBtn" onclick="aimNudge(0.1)">0.1° ▶</button>
+  <button class="aimBtn" onclick="aimNudge(0.5)">0.5° ▶</button>
+</div>
+<style>
+  .aimBtn { background:transparent; border:1px solid #32f08c; color:#32f08c; border-radius:6px;
+    padding:6px 10px; font-size:12px; cursor:pointer; margin:0 2px; }
+  .aimBtn:active { background:#32f08c33; }
+</style>
+<div class="row">服务器 <a href="javascript:setHost()" style="color:#32f08c" id="hostV">检测中…</a> <a href="javascript:rescan()" style="color:#7fa68d;font-size:11px" id="rescanBtn">↻ 重扫</a></div>
+<script>
+const btn = document.getElementById("btn"), bar = document.getElementById("bar"), log = document.getElementById("log");
+const sens = document.getElementById("sens"), sensV = document.getElementById("sensV");
+sens.oninput = () => sensV.textContent = sens.value;
+function preset(v) { sens.value = v; sensV.textContent = v; }
+let live = false, alphaNow = null, strokes = 0;
+let power = 1.0;                                  // 力量系数（可调）
+const powEl = document.getElementById("pow"), powV = document.getElementById("powV");
+powEl.oninput = () => { power = +powEl.value; powV.textContent = power.toFixed(1); };
+let trim = +(localStorage.egolfTrim || 0);        // 杆速数字微调（短杆精确拨杆速用）
+const trimV = document.getElementById("trimV");
+function trimShow() { trimV.textContent = (trim >= 0 ? "+" : "") + trim.toFixed(1) + " m/s"; }
+function trimNudge(d) {
+  trim = Math.max(-10, Math.min(10, trim + d));
+  localStorage.egolfTrim = trim; trimShow();
+  if (navigator.vibrate) navigator.vibrate(10);
+}
+trimShow();
+/* 甩手机击球 · 抗噪算法（针对真实 IMU 数据乱、毛刺多、基线漂而设计）
+   信号管线：陀螺+线加速度合成动作量 x → 3点中值滤波去单样本尖刺
+             → 攻击/释放包络 env（快攻慢放，保峰值、平滑尾部）
+             → 空闲期慢速跟踪噪声基线 nf，阈值 = max(用户灵敏度, nf×2.5+15) 自适应
+   状态机：idle → flick(峰值回落45%处击球，要求启动→峰值>80ms、峰值明显压过阈值)
+           → cool(最短250ms且包络落回才解锁下一甩) */
+let phase = "idle", med = [0, 0, 0], env = 0, nf = 0, peak = 0, tPhase = 0, tPeak = 0, coolT = 0, alphaDown = null;
+const ENV_UP = 0.50, ENV_DOWN = 0.15;   // 包络系数：快攻慢放
+const NF_RATE = 0.02;                   // 噪声基线跟踪速率（≈1.5s 时间常数）
+const FALL = 0.45;                      // 峰值回落到该比例 → 击球
+const RISE_MIN = 80;                    // 启动→峰值至少 ms（抖动到峰值太快 → 作废）
+const DUR_MAX = 900;                    // 甩动最长 ms（慢挥手 → 作废）
+const COOL_MS = 250;                    // 击球后最短冷却 ms
+// 角速度峰值 → 杆速：饱和曲线，甩得越狠杆速越高但有上限
+function csFromPeak(p) { return 5 + 45 * (1 - Math.exp(-p / 900)); }
+function phaseLabel(t) { btn.innerHTML = t; }
+function resetIdle() {
+  phase = "idle"; peak = 0;
+  btn.classList.remove("swing"); phaseLabel("就绪<br>甩手机！");
+}
+function fire(pk) {                                // 用甩动峰值杆速击球
+  const cs = Math.min(62, Math.max(1, csFromPeak(pk) * power + trim));   // trim 数字微调保短杆精度
+  let dA = (alphaNow != null && alphaDown != null) ? alphaNow - alphaDown : 0;
+  if (dA > 180) dA -= 360; if (dA < -180) dA += 360;
+  const fa = Math.min(15, Math.max(-15, -dA * 0.12));
+  phase = "cool"; coolT = performance.now();
+  btn.classList.remove("swing"); phaseLabel("击球<br>✓");
+  send(cs, fa);
+}
+// API 基址：APK 由原生扫描自动写入；网页版默认同源
+const isApk = (location.protocol === "file:");
+let API = localStorage.egolfHost || (isApk ? "" : location.origin);
+function setHost() {
+  const h = prompt("游戏主机地址（留空自动扫描）", API);
+  if (h !== null) {
+    API = h.replace(/\/$/, "");
+    if (API) localStorage.egolfHost = API; else delete localStorage.egolfHost;
+    document.getElementById("hostV").textContent = API || "自动扫描中…";
+    if (!API) rescan();
+  }
+}
+function rescan() {
+  if (window.AndroidScan) { document.getElementById("hostV").textContent = "扫描中…"; AndroidScan.rescan(); }
+}
+window.__scanResult = function(host) {
+  if (host) {
+    API = host; localStorage.egolfHost = host;
+    document.getElementById("hostV").textContent = host;
+  } else {
+    document.getElementById("hostV").textContent = API ? (API + "（未确认）") : "未找到，点此手填";
+  }
+};
+
+window.addEventListener("deviceorientation", e => { if (e.alpha != null) alphaNow = e.alpha; });
+window.addEventListener("devicemotion", e => {
+  if (!live || !e.rotationRate) return;
+  const r = e.rotationRate, ac = e.acceleration || {};
+  const g = Math.hypot(r.alpha || 0, r.beta || 0, r.gamma || 0);
+  const a = Math.hypot(ac.x || 0, ac.y || 0, ac.z || 0);
+  const x = g + 8 * a;                               // 旋转+线加速度合成动作量
+  med[0] = med[1]; med[1] = med[2]; med[2] = x;      // 3 点中值滤波：杀单样本尖刺
+  const m = Math.max(Math.min(med[0], med[1]), Math.min(Math.max(med[0], med[1]), med[2]));
+  env = (m > env) ? env + (m - env) * ENV_UP         // 包络：快攻
+                  : env + (m - env) * ENV_DOWN;      //       慢放
+  const now = performance.now();
+  const TH = Math.max(+sens.value, nf * 2.5 + 15);   // 自适应阈值：灵敏度与噪声基线取大者
+  bar.style.width = Math.min(100, env / (TH * 4) * 100) + "%";
+  if (phase === "cool") {                            // 冷却：最短 COOL_MS 且包络落回才解锁
+    if ((now - coolT > COOL_MS && env < TH * 0.7) || now - coolT > 800) resetIdle();
+    return;
+  }
+  if (phase === "idle") {
+    nf += (env - nf) * NF_RATE;                      // 空闲时跟踪噪声基线（甩动时冻结）
+    if (env > TH) {                                  // 甩动开始
+      peak = env; tPhase = tPeak = now; alphaDown = alphaNow;
+      phase = "flick";
+      btn.classList.add("swing"); phaseLabel("甩动<br>↯");
+    }
+    return;
+  }
+  if (phase === "flick") {                           // 甩动中：冲到峰值，回落即击球
+    if (env > peak) { peak = env; tPeak = now; }
+    if (env < peak * FALL) {                         // 峰值已过
+      if (tPeak - tPhase > RISE_MIN && peak > TH * 1.15) fire(peak);
+      else resetIdle();                              // 抖动或未真正甩起来 → 作废
+    } else if (now - tPhase > DUR_MAX) resetIdle();  // 慢慢挥手不收尾 → 作废
+    return;
+  }
+});
+
+let aimTotal = 0;
+async function aimNudge(d) {
+  aimTotal = Math.max(-15, Math.min(15, aimTotal + d));
+  document.getElementById("aimNow").textContent = aimTotal.toFixed(1) + "°";
+  if (navigator.vibrate) navigator.vibrate(15);
+  try {
+    await fetch(API + "/api/swing", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ aimDelta: d }) });
+  } catch (e) {}
+}
+async function send(cs, fa) {
+  strokes++;
+  aimTotal = 0; document.getElementById("aimNow").textContent = "0.0°";
+  if (navigator.vibrate) navigator.vibrate(60);
+  log.innerHTML = "第 " + strokes + " 杆 · 杆速 " + cs.toFixed(1) + " m/s · 杆面 " + fa.toFixed(1) + "°<br>" + log.innerHTML.split("<br>").slice(0, 2).join("<br>");
+  try {
+    await fetch(API + "/api/swing", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clubSpeed: cs, faceAngle: fa }) });
+  } catch (e) { log.innerHTML = "发送失败：" + e.message + "<br>" + log.innerHTML; }
+}
+
+function startSensors() {
+  live = true; btn.classList.add("on"); btn.innerHTML = "就绪<br>甩手机！";
+  log.textContent = "等待甩动…（游戏端需点「连接手机」）";
+}
+btn.onclick = async () => {
+  if (live) { live = false; resetIdle(); btn.classList.remove("on");
+    btn.innerHTML = "启动<br>传感器"; log.textContent = "已停止"; return; }
+  try {   // iOS 13+ 需要在用户手势里申请权限
+    if (typeof DeviceMotionEvent !== "undefined" && DeviceMotionEvent.requestPermission) {
+      const p = await DeviceMotionEvent.requestPermission();
+      if (p !== "granted") { log.textContent = "未授权运动传感器"; return; }
+      if (DeviceOrientationEvent.requestPermission) await DeviceOrientationEvent.requestPermission();
+    }
+  } catch (e) {}
+  startSensors();
+};
+// Android / 桌面浏览器无需手势授权：页面打开即自动采集，免去每次手动启动
+(function autoStart() {
+  const needGesture = (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function");
+  if (needGesture) { log.textContent = "点上方圆形按钮授权传感器"; return; }
+  startSensors();
+})();
+document.getElementById("hostV").textContent = API || (isApk ? "自动扫描中…" : location.origin);
+</script>
+</body>
+</html>
