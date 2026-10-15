@@ -111,6 +111,11 @@
   #holeBanner .hbName { font-size:54px; font-weight:800; line-height:1.15; color:#eafff2; letter-spacing:.03em;
     margin:10px 0 6px; text-shadow:0 0 34px rgba(50,240,140,.55),0 3px 12px rgba(0,0,0,.85); }
   #holeBanner .hbRoute { font-size:17px; color:#b9e8cc; letter-spacing:.06em; text-shadow:0 0 12px rgba(0,0,0,.9); }
+  #skipHint { position:fixed; bottom:26px; left:50%; transform:translateX(-50%); z-index:40;
+    display:none; color:#eafff2; font-size:14px; letter-spacing:.18em; padding:8px 18px;
+    background:rgba(10,18,24,.55); border:1px solid rgba(255,215,106,.5); border-radius:20px;
+    animation:skipPulse 1.6s ease-in-out infinite; pointer-events:none; }
+  @keyframes skipPulse { 0%,100% { opacity:.45 } 50% { opacity:1 } }
 </style>
 </head>
 <body>
@@ -180,6 +185,7 @@
   <button id="swingBtn">挥 杆</button>
   <button id="imuBtn">连接 IMU</button>
   <button id="phoneBtn">📱 手机球杆</button>
+  <button id="replayBtn">↺ 回放</button>
 </div>
 
 <div id="result" class="hud">
@@ -212,6 +218,8 @@
   <div id="bClub"></div>
   <div id="bNote"></div>
 </div>
+
+<div id="skipHint">点击任意处跳过 ▸</div>
 
 <script>
 "use strict";
@@ -622,15 +630,34 @@ function flyoverIntro(hole, distKm, onDone) {
     orientation: { heading: H(brg), pitch: H(-55) } };
   if (!flyoverIntro.enabled) { viewer.camera.setView(playView); onDone(); return; }
   setState("brief");
+  /* 跳过机制：点击/按键随时跳过开场运镜，直接进瞄准态 */
+  let done = false;
+  const skipEl = document.getElementById("skipHint");
+  if (skipEl) skipEl.style.display = "block";
+  const finish = () => {
+    if (done) return;
+    done = true;
+    viewer.camera.cancelFlight();
+    window.removeEventListener("pointerdown", finish);
+    window.removeEventListener("keydown", finish);
+    if (skipEl) skipEl.style.display = "none";
+    clearTimeout(showBroadcast._t);                       // 转播字幕条同步收起
+    const bc = document.getElementById("broadcast"); if (bc) bc.style.display = "none";
+    onDone();
+  };
+  window.addEventListener("pointerdown", finish);
+  window.addEventListener("keydown", finish);
   // ① 发球台高空远眺
   viewer.camera.setView({ destination: Cesium.Cartesian3.fromDegrees(tLon, tLat, cap(distKm * 4500, 4e6)),
     orientation: { heading: H(brg), pitch: H(-22) } });
   // ② 俯冲到发球台近景
   viewer.camera.flyTo({ destination: Cesium.Cartesian3.fromDegrees(tLon, tLat, 1200),
     orientation: { heading: H(brg), pitch: H(-28) }, duration: 2.0, complete: () => {
+    if (done) return;
     // ③ 360° 环视发球台景点（转慢一点，看清地标）
     const h0 = viewer.camera.heading, t0 = Date.now(), ORBIT_MS = 8000;
     const orbit = () => {
+      if (done) return;                               // 已跳过：中止环视
       const t = Math.min(1, (Date.now() - t0) / ORBIT_MS);
       viewer.camera.setView({ destination: Cesium.Cartesian3.fromDegrees(tLon, tLat, 1200),
         orientation: { heading: h0 + t * Math.PI * 2, pitch: H(-28) } });
@@ -639,10 +666,12 @@ function flyoverIntro(hole, distKm, onDone) {
         // ④ 沿球道走廊推进
         viewer.camera.flyTo({ destination: Cesium.Cartesian3.fromDegrees(mid[0], mid[1], cap(distKm * 2000, 2.5e6)),
           orientation: { heading: H(brg), pitch: H(-75) }, duration: 2.0, complete: () => {
+          if (done) return;
           // ⑤ 果岭悬停 → ⑥ 落回击球视角
           viewer.camera.flyTo({ destination: Cesium.Cartesian3.fromDegrees(pLon, pLat, cap(distKm * 1200, 1.5e6)),
             orientation: { heading: H(brg), pitch: H(-70) }, duration: 1.8, complete: () => {
-            viewer.camera.flyTo(Object.assign({}, playView, { duration: 1.6, complete: onDone }));
+            if (done) return;
+            viewer.camera.flyTo(Object.assign({}, playView, { duration: 1.6, complete: finish }));
           } });
         } });
       }
@@ -680,6 +709,25 @@ function buildShotAids() {
       disableDepthTestDistance: Number.POSITIVE_INFINITY },
     label: { text: "建议落点 " + yd(sugKm) + " 码", font: "11px sans-serif",
       fillColor: Cesium.Color.fromCssColorString("#ffd76a"), pixelOffset: new Cesium.Cartesian2(0, -16),
+      showBackground: true, backgroundColor: Cesium.Color.fromCssColorString("#0a1218aa"),
+      disableDepthTestDistance: Number.POSITIVE_INFINITY }
+  }));
+  /* 风偏预测停点：按建议杆速跑完整物理（含风），画出实际会停的位置 */
+  const distToPinM = distKm * 1000;
+  let bestCs = 20, bestErr = 1e18;
+  for (let cs = 1; cs <= 62; cs++) {
+    const err = Math.abs(targetCarryM(cs, distToPinM) / 1000 - sugKm);
+    if (err < bestErr) { bestErr = err; bestCs = cs; }
+  }
+  const rSim = simulate({ clubSpeed: bestCs, faceAngle: 0, pathAngle: 0, attackAngle: 0, distToPinM }, curHole);
+  const stop = pathPoint(o, aimBearing(), rSim, rSim.totalD);
+  const stopKm = haversineM(o[0], o[1], stop[0], stop[1]) / 1000;
+  aidsEntities.push(viewer.entities.add({
+    position: Cesium.Cartesian3.fromDegrees(stop[0], stop[1], 800),
+    point: { pixelSize: 10, color: Cesium.Color.fromCssColorString("#64b4ff"), outlineColor: Cesium.Color.WHITE, outlineWidth: 2,
+      disableDepthTestDistance: Number.POSITIVE_INFINITY },
+    label: { text: "预计停点 " + yd(stopKm) + " 码", font: "11px sans-serif",
+      fillColor: Cesium.Color.fromCssColorString("#9fd2ff"), pixelOffset: new Cesium.Cartesian2(0, 18),
       showBackground: true, backgroundColor: Cesium.Color.fromCssColorString("#0a1218aa"),
       disableDepthTestDistance: Number.POSITIVE_INFINITY }
   }));
@@ -828,6 +876,7 @@ function commitShot(spec) {
 }
 
 function playFlight(r, brg, origin, landing, onDone) {
+  playFlight.last = { r, brg, origin: origin.slice(), landing: landing.slice() };   // 供 R 键回放
   if (ballEntity) viewer.entities.remove(ballEntity);
   if (landEntity) viewer.entities.remove(landEntity);
   const start = Cesium.JulianDate.now();
@@ -841,9 +890,10 @@ function playFlight(r, brg, origin, landing, onDone) {
   const stop = Cesium.JulianDate.addSeconds(start, r.tof, new Cesium.JulianDate());
   ballEntity = viewer.entities.add({
     position: prop,
-    point: { pixelSize: 14, color: Cesium.Color.WHITE, outlineColor: Cesium.Color.fromCssColorString("#32f08c"), outlineWidth: 3,
+    point: { pixelSize: 14, color: Cesium.Color.WHITE, outlineColor: Cesium.Color.fromCssColorString("#ffd76a"), outlineWidth: 3,
       disableDepthTestDistance: Number.POSITIVE_INFINITY },
-    path: { leadTime: 0, trailTime: r.tof, width: 4, material: Cesium.Color.fromCssColorString("#32f08c") },
+    path: { leadTime: 0, trailTime: r.tof, width: 10,
+      material: new Cesium.PolylineGlowMaterialProperty({ glowPower: 0.18, taperPower: 0.9, color: Cesium.Color.fromCssColorString("#ffd76a") }) },
     availability: new Cesium.TimeIntervalCollection([new Cesium.TimeInterval({ start, stop })])
   });
   viewer.clock.startTime = start.clone();
@@ -875,7 +925,9 @@ function playFlight(r, brg, origin, landing, onDone) {
   const stopCam = viewer.scene.preUpdate.addEventListener(camUpdate);
 
   const watchMs = Math.min(8000, r.tof * 1000 / viewer.clock.multiplier) + 600;
+  whooshStart(Math.max(600, watchMs - 700));         // 飞行风声呼啸，落地前淡出
   setTimeout(() => {
+    whooshStop();
     stopCam();
     const res = lastResult;
     landEntity = viewer.entities.add({
@@ -1026,9 +1078,9 @@ function showResult() {
   const forced = holeStrokes >= curHole.par + 3;     // 杆数封顶：强制按距洞计分
   if (r.holed || forced) {
     const pts = settleHole();
-    if (r.holed) sfxHole();
     const scLabel = r.holed ? parLabel(r.strokes, curHole.par)
                             : "CAP +" + (r.strokes - curHole.par);
+    if (r.holed) { sfxHole(); sfxCheer(scLabel); }     // 进洞三连音 + 分级观众欢呼
     showHoleScore(scLabel, r.strokes, curHole.par, pts);   // 每洞打完：大字报成绩
     afterShotView(() => advanceHole());
     return;
@@ -1116,6 +1168,17 @@ const Phone = {
   }
 };
 document.getElementById("phoneBtn").addEventListener("click", () => Phone.toggle());
+/* 单杆回放：R 键 / 回放按钮，重放上一杆飞行（不改写成绩与落点） */
+function replayLast() {
+  if (state !== "aim" || !playFlight.last) { toast("暂无可回放的杆"); return; }
+  const L = playFlight.last;
+  setState("flight");
+  playFlight(L.r, L.brg, L.origin, L.landing, () => { setState("aim"); frameShot(); });
+}
+document.getElementById("replayBtn").addEventListener("click", replayLast);
+window.addEventListener("keydown", e => {
+  if ((e.key === "r" || e.key === "R") && state === "aim") replayLast();
+});
 document.querySelectorAll(".fbtn[data-f]").forEach(b =>
   b.addEventListener("click", () => applyFilter(b.dataset.f)));
 
@@ -1188,6 +1251,39 @@ function sfxWater() {                      // 落水哗啦
 function sfxHole() {                       // 进洞三连音
   const a = audio(); if (!a || muted) return; audioUnlockHint(); const t = a.currentTime;
   [880, 1174.7, 1568].forEach((f, i) => tone(t + i * 0.09, f, f, 0.3, "triangle", 0.2));
+}
+/* 分级观众欢呼：噪声人群欢呼 + 随机口哨声，按成绩分档 */
+function sfxCheer(label) {
+  const a = audio(); if (!a || muted) return;
+  const t = a.currentTime;
+  const cfg = { EAGLE: [2.2, 0.50, 4], BIRDIE: [1.5, 0.40, 2], PAR: [1.0, 0.28, 1] }[label] || [0.8, 0.22, 0];
+  noise(t, cfg[0], cfg[1], 700);                       // 人群欢呼主体
+  noise(t, Math.min(0.6, cfg[0]), cfg[1] * 0.7, 2500); // 高频掌声层
+  for (let i = 0; i < cfg[2]; i++) {                   // 随机口哨（滑音）
+    const f0 = 1800 + Math.random() * 900;
+    tone(t + 0.2 + Math.random() * cfg[0] * 0.6, f0, f0 * 1.3, 0.25, "sine", 0.10);
+  }
+}
+/* 飞行风声呼啸：循环噪声 + 带通，随飞行时长自动淡出 */
+let whoosh = null;
+function whooshStart(durMs) {
+  const a = audio(); if (!a || muted || a.state !== "running") return;
+  whooshStop();
+  const len = Math.floor(a.sampleRate * 1.5), buf = a.createBuffer(1, len, a.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  const src = a.createBufferSource(); src.buffer = buf; src.loop = true;
+  const f = a.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 700; f.Q.value = 1.1;
+  const g = a.createGain(); const t = a.currentTime, dur = durMs / 1000;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.17, t + 0.4);
+  g.gain.setValueAtTime(0.17, t + Math.max(0.4, dur - 0.6));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(f); f.connect(g); g.connect(master || a.destination);
+  src.start(t); src.stop(t + dur + 0.05);
+  whoosh = src;
+}
+function whooshStop() {
+  if (whoosh) { try { whoosh.stop(); } catch (e) {} whoosh = null; }
 }
 const muteBtn = document.getElementById("muteBtn");
 if (muteBtn) muteBtn.onclick = () => {
