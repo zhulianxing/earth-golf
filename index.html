@@ -925,9 +925,7 @@ function playFlight(r, brg, origin, landing, onDone) {
   const stopCam = viewer.scene.preUpdate.addEventListener(camUpdate);
 
   const watchMs = Math.min(8000, r.tof * 1000 / viewer.clock.multiplier) + 600;
-  whooshStart(Math.max(600, watchMs - 700));         // 飞行风声呼啸，落地前淡出
   setTimeout(() => {
-    whooshStop();
     stopCam();
     const res = lastResult;
     landEntity = viewer.entities.add({
@@ -1193,7 +1191,7 @@ function audio() {
     if (!AC) return null;
     actx = new AC();
     master = actx.createGain();
-    master.gain.value = 1.0;
+    master.gain.value = 1.5;                     /* 整体音量基线 */
     master.connect(actx.destination);
   }
   if (actx.state !== "running") actx.resume().catch(() => {});
@@ -1235,55 +1233,34 @@ function noise(t0, dur, gain, hp) {
 }
 function sfxShot() {                       // 挥杆破空 + 击球 "tock"
   const a = audio(); if (!a || muted) return; audioUnlockHint(); const t = a.currentTime;
-  noise(t, 0.16, 0.45, 1600);
-  tone(t + 0.10, 1500, 320, 0.13, "square", 0.22);
+  noise(t, 0.18, 1.10, 1600);
+  tone(t + 0.10, 1500, 320, 0.13, "square", 0.70);
 }
 function sfxLand() {                       // 落地闷响（抬高基频，笔记本小喇叭也听得到）
   const a = audio(); if (!a || muted) return; audioUnlockHint(); const t = a.currentTime;
-  noise(t, 0.12, 0.26, 0);
-  tone(t, 300, 110, 0.2, "sine", 0.30);
+  noise(t, 0.14, 0.80, 0);
+  tone(t, 300, 110, 0.2, "sine", 0.90);
 }
 function sfxWater() {                      // 落水哗啦
   const a = audio(); if (!a || muted) return; audioUnlockHint(); const t = a.currentTime;
-  noise(t, 0.4, 0.5, 0);
-  tone(t + 0.04, 700, 130, 0.34, "sine", 0.18);
+  noise(t, 0.4, 1.30, 0);
+  tone(t + 0.04, 700, 130, 0.34, "sine", 0.55);
 }
 function sfxHole() {                       // 进洞三连音
   const a = audio(); if (!a || muted) return; audioUnlockHint(); const t = a.currentTime;
-  [880, 1174.7, 1568].forEach((f, i) => tone(t + i * 0.09, f, f, 0.3, "triangle", 0.2));
+  [880, 1174.7, 1568].forEach((f, i) => tone(t + i * 0.09, f, f, 0.3, "triangle", 0.75));
 }
 /* 分级观众欢呼：噪声人群欢呼 + 随机口哨声，按成绩分档 */
 function sfxCheer(label) {
   const a = audio(); if (!a || muted) return;
   const t = a.currentTime;
-  const cfg = { EAGLE: [2.2, 0.50, 4], BIRDIE: [1.5, 0.40, 2], PAR: [1.0, 0.28, 1] }[label] || [0.8, 0.22, 0];
+  const cfg = { EAGLE: [2.2, 1.20, 4], BIRDIE: [1.5, 1.00, 2], PAR: [1.0, 0.70, 1] }[label] || [0.8, 0.55, 0];
   noise(t, cfg[0], cfg[1], 700);                       // 人群欢呼主体
   noise(t, Math.min(0.6, cfg[0]), cfg[1] * 0.7, 2500); // 高频掌声层
   for (let i = 0; i < cfg[2]; i++) {                   // 随机口哨（滑音）
     const f0 = 1800 + Math.random() * 900;
-    tone(t + 0.2 + Math.random() * cfg[0] * 0.6, f0, f0 * 1.3, 0.25, "sine", 0.10);
+    tone(t + 0.2 + Math.random() * cfg[0] * 0.6, f0, f0 * 1.3, 0.25, "sine", 0.35);
   }
-}
-/* 飞行风声呼啸：循环噪声 + 带通，随飞行时长自动淡出 */
-let whoosh = null;
-function whooshStart(durMs) {
-  const a = audio(); if (!a || muted || a.state !== "running") return;
-  whooshStop();
-  const len = Math.floor(a.sampleRate * 1.5), buf = a.createBuffer(1, len, a.sampleRate), d = buf.getChannelData(0);
-  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
-  const src = a.createBufferSource(); src.buffer = buf; src.loop = true;
-  const f = a.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 700; f.Q.value = 1.1;
-  const g = a.createGain(); const t = a.currentTime, dur = durMs / 1000;
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(0.17, t + 0.4);
-  g.gain.setValueAtTime(0.17, t + Math.max(0.4, dur - 0.6));
-  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  src.connect(f); f.connect(g); g.connect(master || a.destination);
-  src.start(t); src.stop(t + dur + 0.05);
-  whoosh = src;
-}
-function whooshStop() {
-  if (whoosh) { try { whoosh.stop(); } catch (e) {} whoosh = null; }
 }
 const muteBtn = document.getElementById("muteBtn");
 if (muteBtn) muteBtn.onclick = () => {
