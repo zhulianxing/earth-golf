@@ -155,7 +155,7 @@ function powSet(v) {
 }
 function powNudge(d) { powSet(power + d); }
 powEl.oninput = () => powSet(+powEl.value);
-powEl.value = power; powV.textContent = power.toFixed(1);
+powEl.value = power; powV.textContent = power.toFixed(2);
 
 /* ——— 高级设置折叠 ——— */
 document.getElementById("cogBtn").onclick = () => {
